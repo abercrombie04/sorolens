@@ -45,10 +45,11 @@ func main() {
 	defer redisClient.Close()
 
 	h := &handler.Handler{
-		Store:  store.NewFullStore(pool),
-		DB:     &dbPinger{pool: pool},
-		Redis:  &redisPinger{client: redisClient},
-		Logger: logger,
+		Store:       store.NewFullStore(pool),
+		DB:          &dbPinger{pool: pool},
+		Redis:       &redisPinger{client: redisClient},
+		RedisClient: &realRedisClient{client: redisClient},
+		Logger:      logger,
 	}
 
 	srv := &http.Server{
@@ -88,3 +89,12 @@ func (p *dbPinger) Ping(ctx context.Context) error { return p.pool.Ping(ctx) }
 type redisPinger struct{ client *redis.Client }
 
 func (p *redisPinger) Ping(ctx context.Context) error { return p.client.Ping(ctx).Err() }
+
+type realRedisClient struct{ client *redis.Client }
+
+func (r *realRedisClient) Incr(ctx context.Context, key string) (int64, error) {
+	return r.client.Incr(ctx, key).Result()
+}
+func (r *realRedisClient) Expire(ctx context.Context, key string, expiration time.Duration) (bool, error) {
+	return r.client.Expire(ctx, key, expiration).Result()
+}

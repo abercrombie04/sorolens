@@ -1,4 +1,4 @@
-module github.com/sorolens/sorolens/services/indexer
+module github.com/sorolens/sorolens/apps/api/services/indexer
 
 go 1.24
 

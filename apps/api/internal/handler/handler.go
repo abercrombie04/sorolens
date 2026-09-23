@@ -3,6 +3,7 @@ package handler
 import (
 	"context"
 	"log/slog"
+	"time"
 
 	"github.com/sorolens/sorolens/apps/api/internal/store"
 )
@@ -20,10 +21,16 @@ type Pinger interface {
 	Ping(ctx context.Context) error
 }
 
+type RedisClient interface {
+	Incr(ctx context.Context, key string) (int64, error)
+	Expire(ctx context.Context, key string, expiration time.Duration) (bool, error)
+}
+
 // Handler holds shared dependencies for all HTTP handlers.
 type Handler struct {
-	Store  APIStore
-	DB     Pinger
-	Redis  Pinger
-	Logger *slog.Logger
+	Store       APIStore
+	DB          Pinger
+	Redis       Pinger
+	RedisClient RedisClient
+	Logger      *slog.Logger
 }

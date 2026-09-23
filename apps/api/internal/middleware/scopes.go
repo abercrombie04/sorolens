@@ -136,14 +136,14 @@ func lookupRequiredScope(r *http.Request) (string, bool) {
 }
 
 // extractAPIKey pulls the token from Authorization: Bearer <token> or the
-// X-API-Key header. Bearer wins when both are present.
+// ?api_key query param. Bearer wins when both are present.
 func extractAPIKey(r *http.Request) string {
 	if h := r.Header.Get("Authorization"); h != "" {
 		if len(h) > 7 && strings.EqualFold(h[:7], "Bearer ") {
 			return strings.TrimSpace(h[7:])
 		}
 	}
-	return strings.TrimSpace(r.Header.Get("X-API-Key"))
+	return strings.TrimSpace(r.URL.Query().Get("api_key"))
 }
 
 func writeScopeError(w http.ResponseWriter, status int, body map[string]string) {

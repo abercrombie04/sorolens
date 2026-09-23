@@ -18,10 +18,11 @@ func New(h *handler.Handler) http.Handler {
 	r.Use(middleware.CORS)
 	r.Use(middleware.Recoverer(h.Logger))
 	r.Use(middleware.Logger(h.Logger))
-	r.Use(middleware.RateLimit())
 	r.Use(chiMiddleware.StripSlashes)
 
-	// Health
+	r.Use(middleware.RateLimit(h.RedisClient, h.Store))
+
+	// Health (not rate-limited)
 	r.Get("/health", h.Health)
 	r.Get("/readyz", h.Readyz)
 

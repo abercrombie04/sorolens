@@ -18,6 +18,7 @@ package store
 
 import (
 	"context"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -58,6 +59,12 @@ type Store interface {
 	// GetGlobalStats returns aggregate counts across all tracked contracts.
 	// Computed with a single SQL query.
 	GetGlobalStats(ctx context.Context) (GlobalStats, error)
+
+	// ComputeAndStoreBaselines computes the 7-day average for each (contract, function)
+	ComputeAndStoreBaselines(ctx context.Context, snapshotDate time.Time) error
+	
+	// CheckAndEmitRegressions compares current 7d averages against the previous baseline
+	CheckAndEmitRegressions(ctx context.Context, snapshotDate time.Time) (int, error)
 }
 
 // ContractFilters holds optional query filters for listing contracts.

@@ -11,7 +11,9 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/sorolens/sorolens/services/indexer/internal/poller"
+	"github.com/sorolens/sorolens/apps/api/internal/store"
+	"github.com/sorolens/sorolens/apps/api/services/indexer/internal/poller"
+	"github.com/sorolens/sorolens/apps/api/services/indexer/internal/watchdog"
 )
 
 func main() {
@@ -48,10 +50,57 @@ func main() {
 	store := &stubStore{}
 	redis := &stubRedis{}
 
+	// Wire watchdog interceptor
+	var wdStore store.WatchdogStore
+	if ws, ok := store.(store.WatchdogStore); ok {
+		wdStore = ws
+	}
+	watchdogEnabled := os.Getenv("WATCHDOG_ENABLED") == "true"
+	watchdogContractID := os.Getenv("WATCHDOG_CONTRACT_ID")
+
+	for k, c := range clients {
+		clients[k] = &watchdogInterceptor{
+			RPCClient: c,
+			store:     wdStore,
+			enabled:   watchdogEnabled,
+			contract:  watchdogContractID,
+			log:       log,
+		}
+	}
+
 	p := poller.NewWithRPCClients(clients, store, redis, cfg, log)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+
+	// Start nightly performance job
+	go func() {
+		type perfStore interface {
+			ComputeAndStoreBaselines(ctx context.Context, snapshotDate time.Time) error
+			CheckAndEmitRegressions(ctx context.Context, snapshotDate time.Time) (int, error)
+		}
+		
+		if ps, ok := store.(perfStore); ok {
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(24 * time.Hour):
+					now := time.Now()
+					if err := ps.ComputeAndStoreBaselines(ctx, now); err != nil {
+						log.Error("failed to compute baselines", "err", err)
+					} else {
+						alerts, err := ps.CheckAndEmitRegressions(ctx, now)
+						if err != nil {
+							log.Error("failed to check regressions", "err", err)
+						} else if alerts > 0 {
+							log.Info("emitted performance regression alerts", "count", alerts)
+						}
+					}
+				}
+			}
+		}
+	}()
 
 	log.Info("sorolens/indexer starting", "mode", *mode)
 	if err := p.Run(ctx, *mode); err != nil {
@@ -59,6 +108,80 @@ func main() {
 		os.Exit(1)
 	}
 	log.Info("sorolens/indexer done")
+}
+
+// watchdogInterceptor intercepts getEvents and routes watchdog events to the classifier
+type watchdogInterceptor struct {
+	poller.RPCClient
+	store    store.WatchdogStore
+	enabled  bool
+	contract string
+	log      *slog.Logger
+}
+
+func (w *watchdogInterceptor) GetEvents(ctx context.Context, start, end uint32, filters []poller.EventFilter) (*poller.GetEventsResult, error) {
+	res, err := w.RPCClient.GetEvents(ctx, start, end, filters)
+	if err != nil || res == nil || !w.enabled || w.contract == "" || w.store == nil {
+		return res, err
+	}
+
+	for _, e := range res.Events {
+		if e.ContractID == w.contract {
+			t, _ := time.Parse(time.RFC3339, e.LedgerClosedAt)
+			raw := watchdog.RawEvent{
+				ContractID:     e.ContractID,
+				Ledger:         int64(e.Ledger),
+				LedgerClosedAt: t,
+				TxHash:         e.TxHash,
+				Topics:         e.Topic,
+				Value:          e.Value,
+			}
+			
+			switch watchdog.ClassifyKind(raw) {
+			case watchdog.KindContractRegistered:
+				if reg, err := watchdog.ProjectRegistration(raw); err == nil {
+					_ = w.store.UpsertMonitoredContract(ctx, store.MonitoredContract{
+						ContractID:    reg.ContractID,
+						Name:          reg.Name,
+						Owner:         reg.Owner,
+						CheckInterval: reg.CheckInterval,
+						RegisteredAt:  reg.Timestamp,
+					})
+					w.log.Info("watchdog: registered contract", "target", reg.ContractID)
+				}
+			case watchdog.KindContractDeregistered:
+				if dereg, err := watchdog.ProjectDeregistration(raw); err == nil {
+					_ = w.store.DeleteMonitoredContract(ctx, dereg.ContractID)
+					w.log.Info("watchdog: deregistered contract", "target", dereg.ContractID)
+				}
+			case watchdog.KindHealthCheck:
+				if h, err := watchdog.ProjectHealth(raw); err == nil {
+					_ = w.store.InsertHealthCheck(ctx, store.HealthCheck{
+						ContractID: h.ContractID,
+						Status:     h.Status,
+						Metadata:   h.Metadata,
+						Ledger:     h.Ledger,
+						TxHash:     h.TxHash,
+						Timestamp:  h.Timestamp,
+					})
+					w.log.Info("watchdog: health check", "target", h.ContractID, "status", h.Status)
+				}
+			case watchdog.KindContractAlert:
+				if a, err := watchdog.ProjectAlert(raw); err == nil {
+					_ = w.store.InsertContractAlert(ctx, store.ContractAlert{
+						ContractID: a.ContractID,
+						Severity:   a.Severity,
+						Message:    a.Message,
+						Ledger:     a.Ledger,
+						TxHash:     a.TxHash,
+						Timestamp:  a.Timestamp,
+					})
+					w.log.Info("watchdog: alert", "target", a.ContractID, "severity", a.Severity)
+				}
+			}
+		}
+	}
+	return res, nil
 }
 
 // ---- stub adapters (replaced in a future session when apps/api is wired) --

@@ -1,12 +1,14 @@
 package middleware
 
 import (
+	"context"
 	"encoding/json"
 	"net"
 	"net/http"
 	"strconv"
-	"sync"
 	"time"
+
+	"github.com/sorolens/sorolens/apps/api/internal/store"
 )
 
 const (
@@ -15,39 +17,49 @@ const (
 	refillRate = rateLimit / 60.0 // tokens per second
 )
 
-type bucket struct {
-	mu     sync.Mutex
-	tokens float64
-	last   time.Time
+type RedisClient interface {
+	Incr(ctx context.Context, key string) (int64, error)
+	Expire(ctx context.Context, key string, expiration time.Duration) (bool, error)
 }
 
-func (b *bucket) allow() bool {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	now := time.Now()
-	elapsed := now.Sub(b.last).Seconds()
-	b.tokens += elapsed * refillRate
-	if b.tokens > rateBurst {
-		b.tokens = rateBurst
-	}
-	b.last = now
-	if b.tokens < 1 {
-		return false
-	}
-	b.tokens--
-	return true
-}
-
-// RateLimit enforces a per-IP token bucket of 100 requests per minute.
-func RateLimit() func(http.Handler) http.Handler {
-	var buckets sync.Map
+// RateLimit enforces a per-IP rate limit of 100 req/min for unauthenticated
+// and 1000 req/min for authenticated requests, backed by Redis.
+func RateLimit(rc RedisClient, lookup APIKeyLookup) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/health" || r.URL.Path == "/readyz" {
+				next.ServeHTTP(w, r)
+				return
+			}
+
 			ip := clientIP(r)
-			v, _ := buckets.LoadOrStore(ip, &bucket{tokens: rateBurst, last: time.Now()})
-			b := v.(*bucket)
-			if !b.allow() {
-				w.Header().Set("Retry-After", strconv.Itoa(60/rateBurst))
+			limit := 100
+			
+			// Check if authenticated
+			token := extractAPIKey(r)
+			if token != "" {
+				key, err := lookup.GetAPIKeyByHash(r.Context(), store.HashKey(token))
+				if err == nil && !key.Revoked() {
+					limit = 1000
+				}
+			}
+
+			redisKey := "rate_limit:" + ip
+			minuteWindow := time.Now().Minute()
+			redisKey = redisKey + ":" + strconv.Itoa(minuteWindow)
+
+			count, err := rc.Incr(r.Context(), redisKey)
+			if err != nil {
+				// On Redis error, fail open
+				next.ServeHTTP(w, r)
+				return
+			}
+			if count == 1 {
+				rc.Expire(r.Context(), redisKey, time.Minute)
+			}
+
+			if count > int64(limit) {
+				w.Header().Set("Retry-After", "60")
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusTooManyRequests)
 				_ = json.NewEncoder(w).Encode(map[string]any{

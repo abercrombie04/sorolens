@@ -47,8 +47,19 @@ jobs:
           version: latest
           working-directory: ${{ matrix.module }}
           args: --timeout=10m
+      - name: Start Postgres
+        working-directory: ./
+        run: docker compose up -d postgres
+      - name: Wait for Postgres
+        working-directory: ./
+        run: |
+          echo "Waiting for PostgreSQL..."
+          DB_CONTAINER=$(docker compose ps -q postgres)
+          until docker exec $DB_CONTAINER pg_isready -U sorolens; do sleep 1; done
       - name: go test
         working-directory: ${{ matrix.module }}
+        env:
+          POSTGRES_TEST_URL: postgres://sorolens:sorolens@localhost:5432/sorolens?sslmode=disable
         run: go test -race -timeout 120s ./...
   # ------------------------------------------------------------
   # Node: XDR decoder package and shared packages
@@ -162,4 +173,35 @@ jobs:
       - name: cargo test
         working-directory: contracts/counter
         run: cargo test
-      
+
+  # ------------------------------------------------------------
+  # Backup & Restore Scripts Test
+  # ------------------------------------------------------------
+  backup-test:
+    name: Backup and Restore Scripts
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Start Postgres
+        run: docker compose up -d postgres
+      - name: Wait for Postgres
+        run: |
+          echo "Waiting for PostgreSQL..."
+          DB_CONTAINER=$(docker compose ps -q postgres)
+          until docker exec $DB_CONTAINER pg_isready -U sorolens; do sleep 1; done
+      - name: Install AWS CLI (for mocking S3)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y awscli
+      - name: Setup Mock S3 Bucket
+        run: |
+          mkdir -p /tmp/s3/sorolens-backups/logical /tmp/s3/sorolens-backups/base /tmp/s3/sorolens-backups/wal
+          echo 'aws() { if [ "$1" = "s3" ] && [ "$2" = "cp" ]; then cp "$3" "${4/s3:\/\//\/tmp\/s3\/}" 2>/dev/null || cp "${3/s3:\/\//\/tmp\/s3\/}" "$4"; fi; }' >> ~/.bashrc
+          echo 'export -f aws' >> ~/.bashrc
+      - name: Run Backup Script
+        run: |
+          bash -c 'source ~/.bashrc && export DB_CONTAINER=$(docker compose ps -q postgres) && ./scripts/backup.sh'
+      - name: Run Restore Script
+        run: |
+          bash -c 'source ~/.bashrc && LATEST_BASE=$(ls /tmp/s3/sorolens-backups/base/base_*.tar.gz | head -n 1) && LATEST_BASE_S3="s3://${LATEST_BASE/\/tmp\/s3\//}" && ./scripts/restore.sh "$LATEST_BASE_S3" "2026-09-23 13:00:00"'
