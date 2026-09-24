@@ -13,8 +13,8 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/sorolens/sorolens/services/indexer/internal/anomaly"
-	"github.com/sorolens/sorolens/services/indexer/internal/partition"
+	"github.com/sorolens/sorolens/apps/api/services/indexer/internal/anomaly"
+	"github.com/sorolens/sorolens/apps/api/services/indexer/internal/partition"
 )
 
 const (

@@ -213,18 +213,29 @@ jobs:
           echo "Waiting for PostgreSQL..."
           DB_CONTAINER=$(docker compose ps -q postgres)
           until docker exec $DB_CONTAINER pg_isready -U sorolens; do sleep 1; done
-      - name: Install AWS CLI (for mocking S3)
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y awscli
+      # A bash function cannot be injected via ~/.bashrc: non-interactive
+      # shells return at the interactivity guard before reaching appended
+      # lines. Source a dedicated mock file in the same shell instead, so the
+      # real awscli is never needed.
       - name: Setup Mock S3 Bucket
         run: |
           mkdir -p /tmp/s3/sorolens-backups/logical /tmp/s3/sorolens-backups/base /tmp/s3/sorolens-backups/wal
-          echo 'aws() { if [ "$1" = "s3" ] && [ "$2" = "cp" ]; then cp "$3" "${4/s3:\/\//\/tmp\/s3\/}" 2>/dev/null || cp "${3/s3:\/\//\/tmp\/s3\/}" "$4"; fi; }' >> ~/.bashrc
-          echo 'export -f aws' >> ~/.bashrc
+          cat > /tmp/aws-mock.sh <<'EOS'
+          # Minimal S3 shim: rewrites s3:// URIs to /tmp/s3/ and copies.
+          aws() {
+            if [ "$1" = "s3" ] && [ "$2" = "cp" ]; then
+              src="$3"
+              dest="$4"
+              case "$src" in s3://*) src="/tmp/s3/${src#s3://}" ;; esac
+              case "$dest" in s3://*) dest="/tmp/s3/${dest#s3://}" ;; esac
+              mkdir -p "$(dirname "$dest")"
+              cp "$src" "$dest"
+            fi
+          }
+          EOS
       - name: Run Backup Script
         run: |
-          bash -c 'source ~/.bashrc && export DB_CONTAINER=$(docker compose ps -q postgres) && ./scripts/backup.sh'
+          bash -c 'source /tmp/aws-mock.sh && export DB_CONTAINER=$(docker compose ps -q postgres) && ./scripts/backup.sh'
       - name: Run Restore Script
         run: |
-          bash -c 'source ~/.bashrc && LATEST_BASE=$(ls /tmp/s3/sorolens-backups/base/base_*.tar.gz | head -n 1) && LATEST_BASE_S3="s3://${LATEST_BASE/\/tmp\/s3\//}" && ./scripts/restore.sh "$LATEST_BASE_S3" "2026-09-23 13:00:00"'
+          bash -c 'source /tmp/aws-mock.sh && LATEST_BASE=$(ls /tmp/s3/sorolens-backups/base/base_*.tar.gz | head -n 1) && LATEST_BASE_S3="s3://${LATEST_BASE/\/tmp\/s3\//}" && ./scripts/restore.sh "$LATEST_BASE_S3" "2026-09-23 13:00:00"'

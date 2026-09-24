@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/sorolens/sorolens/apps/api/internal/soroban"
 	"github.com/sorolens/sorolens/apps/api/internal/store"
 	"github.com/sorolens/sorolens/apps/api/services/indexer/internal/poller"
 	"github.com/sorolens/sorolens/apps/api/services/indexer/internal/watchdog"
@@ -57,12 +58,15 @@ func main() {
 	if len(clients) == 0 {
 		clients[""] = &stubRPC{}
 	}
-	store := &stubStore{}
+	st := &stubStore{}
 	redis := &stubRedis{}
 
-	// Wire watchdog interceptor
+	// Wire watchdog interceptor. The stub store implements no watchdog
+	// surface yet, so wdStore stays nil and the interceptor no-ops; the
+	// any-assertion lights up once the real FullStore is wired here.
+	var storeAny any = st
 	var wdStore store.WatchdogStore
-	if ws, ok := store.(store.WatchdogStore); ok {
+	if ws, ok := storeAny.(store.WatchdogStore); ok {
 		wdStore = ws
 	}
 	watchdogEnabled := os.Getenv("WATCHDOG_ENABLED") == "true"
@@ -78,7 +82,7 @@ func main() {
 		}
 	}
 
-	p := poller.NewWithRPCClients(clients, store, redis, cfg, log)
+	p := poller.NewWithRPCClients(clients, st, redis, cfg, log)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -89,8 +93,8 @@ func main() {
 			ComputeAndStoreBaselines(ctx context.Context, snapshotDate time.Time) error
 			CheckAndEmitRegressions(ctx context.Context, snapshotDate time.Time) (int, error)
 		}
-		
-		if ps, ok := store.(perfStore); ok {
+
+		if ps, ok := storeAny.(perfStore); ok {
 			for {
 				select {
 				case <-ctx.Done():
@@ -120,6 +124,27 @@ func main() {
 	log.Info("sorolens/indexer done")
 }
 
+// decodeWatchdogValue converts an event's base64 XDR value into the decoded
+// map form RawEvent expects. Nested ScVal types (maps, vecs) are not decoded
+// yet by apps/api/internal/soroban, so the map carries the type/human summary;
+// classifier field lookups stay dormant until nested decoding lands.
+func decodeWatchdogValue(valueXDR string) map[string]any {
+	out := map[string]any{}
+	if valueXDR == "" {
+		return out
+	}
+	sc, err := soroban.DecodeScVal(valueXDR)
+	if err != nil {
+		return out
+	}
+	out["type"] = sc.Type
+	out["human"] = sc.Human
+	if m, ok := sc.Value.(map[string]any); ok {
+		return m
+	}
+	return out
+}
+
 // watchdogInterceptor intercepts getEvents and routes watchdog events to the classifier
 type watchdogInterceptor struct {
 	poller.RPCClient
@@ -144,9 +169,9 @@ func (w *watchdogInterceptor) GetEvents(ctx context.Context, start, end uint32, 
 				LedgerClosedAt: t,
 				TxHash:         e.TxHash,
 				Topics:         e.Topic,
-				Value:          e.Value,
+				Value:          decodeWatchdogValue(e.Value),
 			}
-			
+
 			switch watchdog.ClassifyKind(raw) {
 			case watchdog.KindContractRegistered:
 				if reg, err := watchdog.ProjectRegistration(raw); err == nil {

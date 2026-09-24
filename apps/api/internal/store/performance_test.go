@@ -26,8 +26,8 @@ func TestPerformanceBaselinesAndRegressions(t *testing.T) {
 	// Ensure tables are clean for this test
 	_, _ = pool.Exec(ctx, "TRUNCATE TABLE contracts, monitored_contracts, invocations, performance_baselines, contract_alerts CASCADE")
 
-	s := store.NewStore(pool)
-	
+	s := store.NewFullStore(pool)
+
 	// Create a test contract
 	err = s.UpsertContract(ctx, store.Contract{
 		ID:      "C_TEST_REGRESSION",
@@ -37,7 +37,7 @@ func TestPerformanceBaselinesAndRegressions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("UpsertContract: %v", err)
 	}
-	
+
 	// Monitored contract so alerts can be inserted
 	// We need to write to monitored_contracts directly or via WatchdogStore if available.
 	// We'll just insert it directly for test setup to keep it simple.

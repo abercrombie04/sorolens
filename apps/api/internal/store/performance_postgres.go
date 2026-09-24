@@ -30,7 +30,7 @@ func (p *postgresStore) ComputeAndStoreBaselines(ctx context.Context, snapshotDa
 			avg_mem = EXCLUDED.avg_mem,
 			avg_fee = EXCLUDED.avg_fee;
 	`
-	
+
 	_, err := p.pool.Exec(ctx, query, snapshotDate)
 	if err != nil {
 		return fmt.Errorf("failed to compute baselines: %w", err)
@@ -44,7 +44,7 @@ func (p *postgresStore) CheckAndEmitRegressions(ctx context.Context, snapshotDat
 	// 1. Get the current 7d averages
 	// 2. Join with the most recent baseline before current snapshotDate
 	// 3. If current > 1.25 * baseline, insert into contract_alerts.
-	
+
 	query := `
 		WITH current_avgs AS (
 			SELECT 
@@ -93,11 +93,11 @@ func (p *postgresStore) CheckAndEmitRegressions(ctx context.Context, snapshotDat
 		FROM regressions
 		ON CONFLICT (tx_hash, contract_id) DO NOTHING;
 	`
-	
+
 	cmd, err := p.pool.Exec(ctx, query, snapshotDate)
 	if err != nil {
 		return 0, fmt.Errorf("failed to check regressions: %w", err)
 	}
-	
+
 	return int(cmd.RowsAffected()), nil
 }
